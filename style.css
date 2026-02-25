@@ -1,0 +1,108 @@
+/* Animasi untuk Toast Notification */
+.toast-enter { 
+    transform: translateY(100%); 
+    opacity: 0; 
+}
+
+.toast-enter-active { 
+    transform: translateY(0); 
+    opacity: 1; 
+    transition: all 0.3s ease-out; 
+}
+
+.toast-exit { 
+    transform: translateY(0); 
+    opacity: 1; 
+}
+
+.toast-exit-active { 
+    transform: translateY(100%); 
+    opacity: 0; 
+    transition: all 0.3s ease-in; 
+}
+
+/* (Biarkan CSS animasi toast di bagian atas tetap ada) */
+
+/* =========================================
+   PENGATURAN STRUK THERMAL & A4
+========================================= */
+.receipt-container {
+    width: 100%;
+    max-width: 350px; /* Lebar maksimal untuk ukuran kertas Thermal 80mm */
+    margin: 0 auto;
+    background: white;
+    font-family: 'Courier New', Courier, monospace; /* Font khas struk */
+    color: #000;
+    font-size: 14px;
+}
+
+.receipt-container hr {
+    border-top: 1px dashed #000;
+    margin: 8px 0;
+}
+
+@media print {
+    /* 1. Sembunyikan SEMUA elemen di body */
+    body * {
+        visibility: hidden;
+    }
+
+    /* 2. Tampilkan HANYA kontainer struk dan isinya */
+    #area-struk, #area-struk * {
+        visibility: visible;
+    }
+
+    /* 3. Posisikan struk di pojok kiri atas kertas */
+    #area-struk {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%; /* Biarkan printer yang mengatur lebar kertas */
+        margin: 0;
+        padding: 0;
+        box-shadow: none !important;
+        border: none !important;
+    }
+
+    /* 4. Sembunyikan tombol-tombol saat print */
+    .no-print {
+        display: none !important;
+    }
+}
+
+/* (Biarkan semua CSS Anda yang lama di atas) */
+
+/* BARU: Style untuk Tampilan Kartu di Mobile */
+@media (max-width: 767px) {
+  /* Sembunyikan header tabel di mobile */
+  .responsive-table thead {
+    display: none;
+  }
+  /* Ubah baris menjadi blok kartu */
+  .responsive-table tr {
+    display: block;
+    margin-bottom: 1rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.75rem;
+    padding: 1rem;
+    background-color: white;
+  }
+  /* Ubah sel menjadi blok dengan label */
+  .responsive-table td {
+    display: block;
+    text-align: right !important; /* Paksa teks ke kanan agar sejajar dengan label */
+    padding-left: 50%; /* Beri ruang untuk label */
+    position: relative;
+    border: none !important;
+  }
+  .responsive-table td:before {
+    content: attr(data-label); /* Ambil teks dari atribut data-label */
+    position: absolute;
+    left: 0.5rem;
+    width: 45%;
+    padding-right: 0.5rem;
+    font-weight: 600;
+    text-align: left !important;
+    color: #4b5563; /* text-gray-600 */
+  }
+}
