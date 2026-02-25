@@ -1,5 +1,5 @@
 // --- KONFIGURASI URL APPS SCRIPT ---
-// PENTING: Ganti URL di bawah ini dengan URL Web App (Exec) terbaru Anda!
+// PENTING: Ganti URL di bawah ini jika Anda melakukan New Deployment!
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzX_vVW7xQFa1PkDqSPl9UFgUEZMMiisd12q8NNVDSEhdeXBN90y9vkDb0D49jwuhsxyQ/exec';
 
 // --- STATE APLIKASI ---
@@ -17,13 +17,130 @@ let selectedJenis = [];
 let selectedUkuran = [];
 let uniqueCustomers = []; 
 
-// --- INISIALISASI ---
+// --- STATE PENGGUNA ---
+let currentUserRole = null;
+
+// ==========================================
+// --- INISIALISASI & SISTEM LOGIN ---
+// ==========================================
+
 window.onload = () => {
-    switchTab('page-input');
-    loadDatabase();
+    // Cek apakah ada sesi login yang tersimpan
+    const savedRole = sessionStorage.getItem('pos_role');
+    if (savedRole) {
+        processLoginSuccess(savedRole);
+    }
 };
 
-// --- SISTEM NOTIFIKASI TOAST ---
+// Fungsi Hash SHA-256 untuk keamanan Password
+async function hashPassword(password) {
+    const msgBuffer = new TextEncoder().encode(password);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return hashHex;
+}
+
+async function handleLogin(e) {
+    e.preventDefault(); 
+    
+    const userInp = document.getElementById('login-username').value.trim();
+    const passInpPlain = document.getElementById('login-password').value.trim();
+    const errText = document.getElementById('login-error');
+    const btnSubmit = e.target.querySelector('button[type="submit"]');
+    
+    errText.classList.add('hidden');
+    
+    const originalBtnText = btnSubmit.innerText;
+    btnSubmit.innerText = "Memeriksa...";
+    btnSubmit.disabled = true;
+    btnSubmit.classList.add('opacity-70');
+
+    try {
+        // Hash password sebelum dikirim ke server
+        const hashedPass = await hashPassword(passInpPlain);
+
+        const formData = new URLSearchParams();
+        formData.append('action', 'login');
+        formData.append('username', userInp);
+        formData.append('password', hashedPass);
+
+        const response = await fetch(SCRIPT_URL, { method: 'POST', body: formData });
+        const result = await response.json(); 
+
+        if (result.status === 'success') {
+            const role = result.role;
+            sessionStorage.setItem('pos_role', role);
+            processLoginSuccess(role);
+        } else {
+            errText.innerText = result.message;
+            errText.classList.remove('hidden');
+        }
+    } catch (error) {
+        errText.innerText = "Gagal terhubung ke server. Periksa koneksi internet.";
+        errText.classList.remove('hidden');
+    } finally {
+        btnSubmit.innerText = originalBtnText;
+        btnSubmit.disabled = false;
+        btnSubmit.classList.remove('opacity-70');
+    }
+}
+
+function processLoginSuccess(role) {
+    currentUserRole = role;
+    
+    document.getElementById('login-screen').classList.add('hidden');
+    document.getElementById('app-container').classList.remove('hidden');
+    document.getElementById('app-container').classList.add('flex'); 
+    
+    document.getElementById('form-login').reset();
+    applyRolePermissions();
+    
+    // Unduh data utama jika belum ada
+    if (databaseBarang.length === 0) {
+        loadDatabase();
+    }
+}
+
+function applyRolePermissions() {
+    const tabInput = document.getElementById('tab-input');
+    const tabDashboard = document.getElementById('tab-dashboard');
+    const tabUsers = document.getElementById('tab-users');
+    
+    if (currentUserRole === 'kasir') {
+        tabInput.classList.add('hidden');
+        tabDashboard.classList.add('hidden');
+        tabUsers.classList.add('hidden');
+        switchTab('page-transaksi');
+        showToast("Login Kasir Berhasil", "info");
+    } else if (currentUserRole === 'admin') {
+        tabInput.classList.remove('hidden');
+        tabDashboard.classList.remove('hidden');
+        tabUsers.classList.remove('hidden');
+        switchTab('page-dashboard');
+        showToast("Login Admin Berhasil");
+    } else {
+        showToast(`Login berhasil sebagai: ${currentUserRole}`);
+        switchTab('page-transaksi');
+    }
+}
+
+function handleLogout() {
+    sessionStorage.removeItem('pos_role');
+    currentUserRole = null;
+    
+    document.getElementById('app-container').classList.add('hidden');
+    document.getElementById('app-container').classList.remove('flex');
+    document.getElementById('login-screen').classList.remove('hidden');
+    
+    resetSemua();
+}
+
+
+// ==========================================
+// --- UTILITIES (TOAST, LOADING, TABS) ---
+// ==========================================
+
 function showToast(message, type = 'success') {
     const container = document.getElementById('toast-container');
     if (!container) return; 
@@ -61,7 +178,6 @@ function toggleLoading(show, text = 'Memuat Data...') {
     else overlay.classList.add('hidden');
 }
 
-// --- NAVIGASI TAB ---
 function switchTab(pageId) {
     document.querySelectorAll('.page-section').forEach(p => p.classList.add('hidden'));
     const target = document.getElementById(pageId);
@@ -77,53 +193,43 @@ function switchTab(pageId) {
         activeTab.className = "tab-btn px-4 py-2 rounded-md font-semibold text-blue-600 bg-blue-50 transition whitespace-nowrap";
     }
 
-    // Load data dashboard saat tab diklik pertama kali
     if (pageId === 'page-dashboard' && allSoldItems.length === 0) {
         loadDashboardData();
     }
+    if (pageId === 'page-users') {
+        loadUsers();
+    }
 }
 
-// --- KOMUNIKASI DATABASE ---
+
+// ==========================================
+// --- KOMUNIKASI DATABASE UTAMA ---
+// ==========================================
+
 async function loadDatabase() {
     toggleLoading(true, 'Mengunduh Data Database...');
     try {
         const urlWithCacheBuster = SCRIPT_URL + '?v=' + new Date().getTime();
         const response = await fetch(urlWithCacheBuster);
         
-        if(!response.ok) {
-            throw new Error(`Koneksi Gagal: ${response.status} ${response.statusText}`);
-        }
+        if(!response.ok) throw new Error(`Koneksi Gagal: ${response.status} ${response.statusText}`);
         
         const rawText = await response.text();
-
-        if (!rawText || rawText.trim() === "") {
-            throw new Error("Server mengembalikan respon kosong. Pastikan Anda melakukan 'New Deployment' dan tidak ada error di script.");
-        }
+        if (!rawText || rawText.trim() === "") throw new Error("Server mengembalikan respon kosong.");
 
         let data;
         try {
             data = JSON.parse(rawText);
         } catch (jsonError) {
-            if (rawText.includes("<!DOCTYPE html>")) {
-                throw new Error("Terblokir CORS/Otentikasi. Pastikan akses Deployment adalah 'Anyone'.");
-            }
-            throw new Error("Format data dari server bukan JSON yang valid. Cek Console untuk detail.");
+            throw new Error("Format data dari server bukan JSON yang valid.");
         }
         
-        if (data.status === 'error') {
-            throw new Error(data.message || "Terjadi kesalahan pada Server Apps Script.");
-        }
+        if (data.status === 'error') throw new Error(data.message || "Terjadi kesalahan pada Server.");
         
-        if (Array.isArray(data)) {
-            databaseBarang = data;
-        } else {
-            databaseBarang = data.barang || [];
-            riwayatTransaksi = data.pesanan || [];
-        }
+        databaseBarang = data.barang || [];
+        riwayatTransaksi = data.pesanan || [];
         
-        if (databaseBarang.length === 0) {
-            showToast("Koneksi Berhasil, tapi Data Barang di Spreadsheet Kosong.", "info");
-        } else {
+        if (databaseBarang.length > 0) {
             showToast(`Berhasil memuat ${databaseBarang.length} data barang.`);
         }
 
@@ -132,12 +238,9 @@ async function loadDatabase() {
         updateDropdownNamaSemua();
         updateDropdownRiwayat();
         
-        if(riwayatTransaksi.length > 0) {
-            tampilkanStruk(riwayatTransaksi[0]);
-        }
+        if(riwayatTransaksi.length > 0) tampilkanStruk(riwayatTransaksi[0]);
         
     } catch (error) {
-        console.error("Load DB Error:", error);
         showToast(error.message, "error");
     } finally {
         toggleLoading(false);
@@ -145,7 +248,10 @@ async function loadDatabase() {
 }
 
 
+// ==========================================
 // --- HALAMAN 1: INPUT BARANG ---
+// ==========================================
+
 function submitBarang(e) {
     e.preventDefault();
     
@@ -163,26 +269,21 @@ function submitBarang(e) {
     let actionType = 'addBarang';
 
     if (existingItem) {
-        const isConfirmed = confirm(`Data barang sudah tersedia (Harga saat ini: Rp ${existingItem.harga.toLocaleString('id-ID')}).\nApakah Anda ingin memperbarui harga barang menjadi Rp ${parseInt(hargaInput).toLocaleString('id-ID')}?`);
-        if (!isConfirmed) return; 
+        if (!confirm(`Data barang sudah tersedia (Rp ${existingItem.harga.toLocaleString('id-ID')}).\nPerbarui harga menjadi Rp ${parseInt(hargaInput).toLocaleString('id-ID')}?`)) return; 
         actionType = 'editBarang'; 
     }
 
-    toggleLoading(true, existingItem ? 'Memperbarui Harga Barang...' : 'Menyimpan Barang...');
+    toggleLoading(true, existingItem ? 'Memperbarui Harga...' : 'Menyimpan Barang...');
 
-    const formData = new URLSearchParams();
-    formData.append('action', actionType);
-    formData.append('jenis', jenisInput);
-    formData.append('nama', namaInput);
-    formData.append('harga', hargaInput);
-    formData.append('ukuran', ukuranInput);
+    const formData = new URLSearchParams({
+        action: actionType, jenis: jenisInput, nama: namaInput, harga: hargaInput, ukuran: ukuranInput
+    });
 
     fetch(SCRIPT_URL, { method: 'POST', body: formData })
         .then(res => res.text())
         .then(text => {
             if (text.toLowerCase().includes("error")) throw new Error(text);
-            
-            showToast(existingItem ? "Harga barang berhasil diperbarui!" : "Barang berhasil ditambahkan!");
+            showToast(existingItem ? "Harga berhasil diperbarui!" : "Barang berhasil ditambahkan!");
             document.getElementById('form-barang').reset();
             loadDatabase();
         })
@@ -193,16 +294,14 @@ function submitBarang(e) {
 }
 
 
-// --- HALAMAN 2: TRANSAKSI (LOGIKA DROPDOWN & KERANJANG) ---
+// ==========================================
+// --- HALAMAN 2: TRANSAKSI & KERANJANG ---
+// ==========================================
+
 function lanjutKePilihBarang() {
     const nama = document.getElementById('trans-nama-pelanggan').value.trim();
     const wa = document.getElementById('trans-no-wa').value.trim();
-    
-    if(!nama || !wa) {
-        showToast("Nama dan No WhatsApp wajib diisi!", "error");
-        return;
-    }
-
+    if(!nama || !wa) return showToast("Nama dan No WhatsApp wajib diisi!", "error");
     document.getElementById('step-pelanggan').classList.add('hidden');
     document.getElementById('step-barang').classList.remove('hidden');
 }
@@ -215,27 +314,19 @@ function kembaliKePelanggan() {
 function updateDropdownJenis() {
     const select = document.getElementById('trans-jenis');
     if (!select) return;
-    select.innerHTML = '<option value="">-- Semua Jenis --</option>' + 
-        jenisUnik.map(j => `<option value="${j}">${j}</option>`).join('');
+    select.innerHTML = '<option value="">-- Semua Jenis --</option>' + jenisUnik.map(j => `<option value="${j}">${j}</option>`).join('');
 }
 
 function updateDropdownNamaSemua(filterJenis = "") {
     const select = document.getElementById('trans-nama');
     if (!select) return;
-
-    let items = databaseBarang;
-    if (filterJenis) {
-        items = databaseBarang.filter(item => item.jenis === filterJenis);
-    }
-    
+    let items = filterJenis ? databaseBarang.filter(item => item.jenis === filterJenis) : databaseBarang;
     const namaUnik = [...new Set(items.map(item => item.nama).filter(Boolean))];
-    select.innerHTML = '<option value="">-- Pilih Barang --</option>' + 
-        namaUnik.map(nama => `<option value="${nama}">${nama}</option>`).join('');
+    select.innerHTML = '<option value="">-- Pilih Barang --</option>' + namaUnik.map(nama => `<option value="${nama}">${nama}</option>`).join('');
 }
 
 function syncNamaBerdasarkanJenis() {
-    const jenisTerpilih = document.getElementById('trans-jenis').value;
-    updateDropdownNamaSemua(jenisTerpilih); 
+    updateDropdownNamaSemua(document.getElementById('trans-jenis').value); 
     resetInputDetail(); 
 }
 
@@ -251,11 +342,9 @@ function ubahJenisDropdown(arah) {
 function syncJenisBerdasarkanNama() {
     const namaTerpilih = document.getElementById('trans-nama').value;
     const selectUkuran = document.getElementById('trans-ukuran');
-    
     if (namaTerpilih) {
         const variasiBarang = databaseBarang.filter(i => i.nama === namaTerpilih);
         selectUkuran.innerHTML = variasiBarang.map(item => `<option value="${item.ukuran}">${item.ukuran}</option>`).join('');
-        
         const selectJenis = document.getElementById('trans-jenis');
         if (variasiBarang.length > 0 && selectJenis.value !== variasiBarang[0].jenis) {
             selectJenis.value = variasiBarang[0].jenis;
@@ -270,9 +359,7 @@ function syncHargaBerdasarkanUkuran() {
     const namaTerpilih = document.getElementById('trans-nama').value;
     const ukuranTerpilih = document.getElementById('trans-ukuran').value;
     const item = databaseBarang.find(i => i.nama === namaTerpilih && i.ukuran === ukuranTerpilih);
-    if (item) {
-        document.getElementById('trans-harga').value = item.harga.toLocaleString('id-ID');
-    }
+    if (item) document.getElementById('trans-harga').value = item.harga.toLocaleString('id-ID');
 }
 
 function ubahJumlah(delta) {
@@ -290,11 +377,9 @@ function resetInputDetail() {
 }
 
 function tambahkanKeKeranjang() {
-    const namaSelect = document.getElementById('trans-nama');
-    const nama = namaSelect.value;
+    const nama = document.getElementById('trans-nama').value;
     const ukuran = document.getElementById('trans-ukuran').value;
-    
-    if(!nama) return showToast("Silakan pilih nama barang terlebih dahulu!", "error");
+    if(!nama) return showToast("Silakan pilih nama barang!", "error");
 
     const itemOriginal = databaseBarang.find(i => i.nama === nama && i.ukuran === ukuran);
     if(!itemOriginal) return showToast("Data barang tidak valid.", "error");
@@ -302,21 +387,10 @@ function tambahkanKeKeranjang() {
     const harga = parseInt(itemOriginal.harga);
     const jml = parseInt(document.getElementById('trans-jumlah').value) || 1;
     
-    const indexAda = keranjang.findIndex(k => k.nama === nama && k.ukuran === ukuran);
-    if(indexAda > -1) {
-        return showToast("Barang dengan ukuran tersebut sudah ada di keranjang!", "error");
-    } else {
-        keranjang.push({ 
-            nama: nama, 
-            ukuran: ukuran, 
-            harga: harga, 
-            jml: jml, 
-            subtotal: harga * jml 
-        });
-    }
+    if(keranjang.some(k => k.nama === nama && k.ukuran === ukuran)) return showToast("Barang ini sudah ada di keranjang!", "error");
 
+    keranjang.push({ nama, ukuran, harga, jml, subtotal: harga * jml });
     document.getElementById('trans-nama').value = '';
-    document.getElementById('trans-jumlah').value = 1;
     resetInputDetail();
     showToast("Barang ditambahkan ke keranjang");
     renderTabelKeranjang();
@@ -329,7 +403,6 @@ function hapusDariKeranjang(index) {
 
 function renderTabelKeranjang() {
     const tbody = document.getElementById('tabel-keranjang-body');
-    
     if (keranjang.length === 0) {
         tbody.innerHTML = '<tr><td colspan="6" class="px-4 py-4 text-center text-gray-400 italic">Keranjang masih kosong</td></tr>';
         document.getElementById('total-item-keranjang').innerText = '0';
@@ -337,16 +410,11 @@ function renderTabelKeranjang() {
         return;
     }
 
-    let html = '';
-    let totalItem = 0;
-    let totalHarga = 0;
-
-    keranjang.forEach((item, index) => {
+    let totalItem = 0, totalHarga = 0;
+    tbody.innerHTML = keranjang.map((item, index) => {
         totalItem += item.jml;
         totalHarga += item.subtotal;
-        
-        // Atribut data-label ditambahkan untuk tampilan Mobile
-        html += `
+        return `
             <tr class="bg-white border-b md:border-b-0 hover:bg-gray-50">
                 <td data-label="Barang" class="px-4 py-3 font-medium text-gray-800">${item.nama}</td>
                 <td data-label="Ukuran" class="px-4 py-3 text-center">${item.ukuran}</td>
@@ -358,17 +426,14 @@ function renderTabelKeranjang() {
                         <svg class="w-5 h-5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                     </button>
                 </td>
-            </tr>
-        `;
-    });
-
-    tbody.innerHTML = html;
+            </tr>`;
+    }).join('');
     document.getElementById('total-item-keranjang').innerText = totalItem;
     document.getElementById('total-harga-keranjang').innerText = totalHarga.toLocaleString('id-ID');
 }
 
 function prosesBayar() {
-    if (keranjang.length === 0) return showToast("Keranjang kosong! Tambahkan barang dulu.", "error");
+    if (keranjang.length === 0) return showToast("Keranjang kosong!", "error");
 
     const namaPelanggan = document.getElementById('trans-nama-pelanggan').value;
     const noWa = document.getElementById('trans-no-wa').value;
@@ -384,45 +449,29 @@ function prosesBayar() {
     const currentTx = {
         id: txId,
         tanggal: editingTxId && currentViewedTx ? currentViewedTx.tanggal : new Date().toLocaleDateString('id-ID', opsiTanggal), 
-        nama: namaPelanggan,
-        wa: noWa,
-        items: [...keranjang],
-        totalItem: totalItem,
-        totalHarga: totalHarga
+        nama: namaPelanggan, wa: noWa, items: [...keranjang], totalItem, totalHarga
     };
 
-    const formData = new URLSearchParams();
-    formData.append('action', actionType);
-    formData.append('id', txId);
-    formData.append('nama_pelanggan', namaPelanggan);
-    formData.append('no_wa', noWa);
-    formData.append('detail_pesanan', JSON.stringify(keranjang));
-    formData.append('total_item', totalItem);
-    formData.append('total_harga', totalHarga);
+    const formData = new URLSearchParams({
+        action: actionType, id: txId, nama_pelanggan: namaPelanggan, no_wa: noWa, 
+        detail_pesanan: JSON.stringify(keranjang), total_item: totalItem, total_harga: totalHarga
+    });
 
     fetch(SCRIPT_URL, { method: 'POST', body: formData })
         .then(res => res.text())
         .then(text => {
             toggleLoading(false);
-            
             if (text.includes("ID tidak ditemukan") || (actionType === 'editTransaksi' && !text.includes("diperbarui"))) {
-                let errorMsg = text.includes("ID tidak ditemukan") 
-                    ? "Gagal: Pesanan lama ini belum memiliki ID di Spreadsheet." 
-                    : "Gagal: Respon server tidak valid.";
-                showToast(errorMsg, "error");
-                loadDatabase(); 
-                return;
+                showToast("Gagal: Respon server tidak valid.", "error"); loadDatabase(); return;
             }
 
             if(editingTxId) {
                 const index = riwayatTransaksi.findIndex(t => t.id === editingTxId);
                 if(index > -1) riwayatTransaksi[index] = currentTx;
-            } else {
-                riwayatTransaksi.unshift(currentTx);
-            }
+            } else riwayatTransaksi.unshift(currentTx);
+            
             updateDropdownRiwayat();
-
-            showToast(editingTxId ? "Pesanan Berhasil Diperbarui!" : "Transaksi Berhasil Disimpan!");
+            showToast(editingTxId ? "Pesanan Diperbarui!" : "Transaksi Disimpan!");
             tampilkanStruk(currentTx);
             switchTab('page-pesanan');
             editingTxId = null; 
@@ -434,26 +483,24 @@ function prosesBayar() {
 }
 
 
+// ==========================================
 // --- HALAMAN 3: STRUK & REKAP ---
+// ==========================================
+
 function updateDropdownRiwayat() {
     const select = document.getElementById('dropdown-riwayat');
     const areaStruk = document.getElementById('area-struk');
-    
     if(riwayatTransaksi.length === 0) {
         select.innerHTML = '<option value="">-- Belum ada riwayat --</option>';
         if (areaStruk) areaStruk.classList.add('hidden'); 
         return;
     }
-    
     if (areaStruk) areaStruk.classList.remove('hidden');
-    select.innerHTML = riwayatTransaksi.map(tx => 
-        `<option value="${tx.id}">${tx.tanggal} - ${tx.nama}</option>`
-    ).join('');
+    select.innerHTML = riwayatTransaksi.map(tx => `<option value="${tx.id}">${tx.tanggal} - ${tx.nama}</option>`).join('');
 }
 
 function gantiRiwayat() {
-    const id = document.getElementById('dropdown-riwayat').value;
-    const tx = riwayatTransaksi.find(t => t.id === id);
+    const tx = riwayatTransaksi.find(t => t.id === document.getElementById('dropdown-riwayat').value);
     if(tx) tampilkanStruk(tx);
 }
 
@@ -465,110 +512,66 @@ function tampilkanStruk(tx) {
     document.getElementById('rekap-total-item').innerText = tx.totalItem;
     document.getElementById('rekap-total-harga').innerText = tx.totalHarga.toLocaleString('id-ID');
 
-    const containerItems = document.getElementById('tabel-rekap-body');
-    let html = '';
-    
-    // Render item dengan gaya Thermal (Nama di atas, Harga di bawah)
-    tx.items.forEach((item) => {
-        html += `
-            <div class="mb-2">
-                <!-- Baris Atas: Nama Barang & Ukuran -->
-                <div class="font-bold">${item.nama} (${item.ukuran})</div>
-                
-                <!-- Baris Bawah: Qty x Harga = Subtotal (Kanan Kiri) -->
-                <div class="flex justify-between text-sm">
-                    <span>${item.jml} x ${item.harga.toLocaleString('id-ID')}</span>
-                    <span>${item.subtotal.toLocaleString('id-ID')}</span>
-                </div>
+    const tbody = document.getElementById('tabel-rekap-body');
+    // Format untuk Print Thermal (Nama atas, harga bawah)
+    tbody.innerHTML = tx.items.map((item) => `
+        <div class="mb-2">
+            <div class="font-bold">${item.nama} (${item.ukuran})</div>
+            <div class="flex justify-between text-sm">
+                <span>${item.jml} x Rp ${item.harga.toLocaleString('id-ID')}</span>
+                <span>Rp ${item.subtotal.toLocaleString('id-ID')}</span>
             </div>
-        `;
-    });
-    
-    containerItems.innerHTML = html;
+        </div>
+    `).join('');
     
     document.getElementById('dropdown-riwayat').value = tx.id;
 }
 
 function kirimWhatsApp() {
     if(!currentViewedTx) return showToast("Tidak ada data pesanan yang dipilih!", "error");
-
-    let nama = currentViewedTx.nama;
-    let wa = String(currentViewedTx.wa); 
-    let totalHarga = currentViewedTx.totalHarga.toLocaleString('id-ID');
+    let { nama, wa, totalHarga, items } = currentViewedTx;
     
-    wa = wa.replace(/[^0-9]/g, ''); 
-    if (wa.startsWith('0')) {
-        wa = '62' + wa.substring(1);
-    } else if (!wa.startsWith('62')) {
-        wa = '62' + wa;
-    }
+    wa = String(wa).replace(/[^0-9]/g, ''); 
+    if (wa.startsWith('0')) wa = '62' + wa.substring(1);
+    else if (!wa.startsWith('62')) wa = '62' + wa;
 
     let pesan = `Halo *${nama}*,\nBerikut adalah rincian pesanan Anda dari toko kami:\n\n`;
-    currentViewedTx.items.forEach((item, index) => {
+    items.forEach((item, index) => {
         pesan += `${index+1}. ${item.nama} (Uk: ${item.ukuran})\n   ${item.jml} x Rp ${item.harga.toLocaleString('id-ID')} = Rp ${item.subtotal.toLocaleString('id-ID')}\n`;
     });
-    pesan += `\n==================\n`;
-    pesan += `*TOTAL TAGIHAN : Rp ${totalHarga}*\n`;
-    pesan += `==================\n\n`;
-    pesan += `Pembayaran dapat dilakukan secara tunai atau transfer\n\n`;
-    pesan += `Transfer dapat dilakukan melalui\n`;
-    pesan += `Seabank : 901355785479\n`;
-    pesan += `atau\n`;
-    pesan += `Shopee pay/gopay : 081357432595\n`;
-    pesan += `Atas nama : Ummu Hayatin\n\n`;
-    pesan += `*Pastikan konfirmasi dengan mengirimkan bukti pembayaran.*\n\n`;
-    pesan += `Terima kasih banyak telah berbelanja, Semoga berkah! 🙏😊`;
-
-    const url = `https://wa.me/${wa}?text=${encodeURIComponent(pesan)}`;
-    window.open(url, '_blank');
+    pesan += `\n==================\n*TOTAL TAGIHAN : Rp ${totalHarga.toLocaleString('id-ID')}*\n==================\n\n`;
+    pesan += `Pembayaran dapat dilakukan secara tunai atau transfer\n\nTransfer dapat dilakukan melalui\nSeabank : 901355785479\natau\nShopee pay/gopay : 081357432595\nAtas nama : Ummu Hayatin\n\n*Pastikan konfirmasi dengan mengirimkan bukti pembayaran.*\n\nTerima kasih banyak telah berbelanja, Semoga berkah! 🙏😊`;
+    window.open(`https://wa.me/${wa}?text=${encodeURIComponent(pesan)}`, '_blank');
 }
 
 function editPesanan() {
     if(!currentViewedTx) return showToast("Tidak ada data pesanan yang dipilih!", "error");
-    
     editingTxId = currentViewedTx.id;
-    
     document.getElementById('trans-nama-pelanggan').value = currentViewedTx.nama;
     document.getElementById('trans-no-wa').value = currentViewedTx.wa;
-    
     keranjang = JSON.parse(JSON.stringify(currentViewedTx.items));
-    
     renderTabelKeranjang();
     lanjutKePilihBarang(); 
     switchTab('page-transaksi');
-    
     showToast("Mode Edit: Silakan perbarui pesanan", "info");
 }
 
 function hapusPesanan() {
     if(!currentViewedTx) return showToast("Tidak ada data pesanan yang dipilih!", "error");
-    
-    if(!confirm(`Apakah Anda yakin ingin MEMBATALKAN dan MENGHAPUS pesanan atas nama ${currentViewedTx.nama}?`)) {
-        return;
-    }
+    if(!confirm(`Apakah Anda yakin ingin MENGHAPUS pesanan atas nama ${currentViewedTx.nama}?`)) return;
 
-    const txId = currentViewedTx.id;
     toggleLoading(true, 'Menghapus Pesanan...');
-
-    const formData = new URLSearchParams();
-    formData.append('action', 'deleteTransaksi');
-    formData.append('id', txId);
+    const formData = new URLSearchParams({ action: 'deleteTransaksi', id: currentViewedTx.id });
 
     fetch(SCRIPT_URL, { method: 'POST', body: formData })
         .then(res => res.text())
         .then(text => {
             toggleLoading(false);
             showToast("Pesanan berhasil dihapus!");
-            
-            riwayatTransaksi = riwayatTransaksi.filter(t => t.id !== txId);
+            riwayatTransaksi = riwayatTransaksi.filter(t => t.id !== currentViewedTx.id);
             updateDropdownRiwayat();
-            
-            if(riwayatTransaksi.length > 0) {
-                tampilkanStruk(riwayatTransaksi[0]);
-            } else {
-                currentViewedTx = null;
-                document.getElementById('area-struk').classList.add('hidden');
-            }
+            if(riwayatTransaksi.length > 0) tampilkanStruk(riwayatTransaksi[0]);
+            else { currentViewedTx = null; document.getElementById('area-struk').classList.add('hidden'); }
         })
         .catch(err => {
             toggleLoading(false);
@@ -581,17 +584,122 @@ function resetSemua() {
     editingTxId = null;
     document.getElementById('trans-nama-pelanggan').value = '';
     document.getElementById('trans-no-wa').value = '';
-    
     renderTabelKeranjang();
     kembaliKePelanggan();
     switchTab('page-transaksi');
 }
 
-// =========================================================================
-// --- HALAMAN 4: FUNGSI DASHBOARD (DENGAN SELECT ALL) ---
-// =========================================================================
+// ==========================================
+// --- SISTEM CETAK PRINTER (THERMAL & A4) ---
+// ==========================================
 
-// Menutup dropdown jika user klik di luar area
+let printerDevice = null;
+let printerCharacteristic = null;
+let isPrinting = false;
+
+function cetakStrukA4() {
+    window.print();
+}
+
+async function connectBluetooth() {
+    if (!navigator.bluetooth) { 
+        alert("Browser ini tidak mendukung koneksi Bluetooth (Gunakan Chrome di Android/PC)."); 
+        return; 
+    }
+    const btnBt = document.getElementById('btn-bt-connect');
+    const txtBt = document.getElementById('bt-status-text');
+
+    try {
+        if (printerDevice && printerDevice.gatt.connected) printerDevice.gatt.disconnect();
+        printerDevice = await navigator.bluetooth.requestDevice({ filters: [{ services: ['000018f0-0000-1000-8000-00805f9b34fb'] }] });
+        printerDevice.addEventListener('gattserverdisconnected', onDisconnected);
+        const server = await printerDevice.gatt.connect();
+        await new Promise(r => setTimeout(r, 500)); 
+        const service = await server.getPrimaryService('000018f0-0000-1000-8000-00805f9b34fb');
+        printerCharacteristic = await service.getCharacteristic('00002af1-0000-1000-8000-00805f9b34fb');
+        
+        btnBt.classList.remove('bg-gray-100', 'text-gray-600');
+        btnBt.classList.add('bg-green-600', 'text-white', 'border-green-700');
+        txtBt.innerText = "Printer Ready";
+        showToast("Printer Berhasil Terhubung!");
+    } catch (e) { 
+        if (e.name !== 'NotFoundError') alert("Gagal Konek: " + e.message); 
+        onDisconnected(); 
+    }
+}
+
+function onDisconnected() {
+    const btnBt = document.getElementById('btn-bt-connect');
+    const txtBt = document.getElementById('bt-status-text');
+    btnBt.classList.remove('bg-green-600', 'text-white', 'border-green-700');
+    btnBt.classList.add('bg-gray-100', 'text-gray-600');
+    txtBt.innerText = "Printer";
+    printerCharacteristic = null;
+}
+
+function strToBytes(str) {
+    const bytes = [];
+    for (let i = 0; i < str.length; i++) {
+        let code = str.charCodeAt(i);
+        if (code > 255) code = 63; 
+        bytes.push(code);
+    }
+    return new Uint8Array(bytes);
+}
+
+async function cetakStrukThermal() {
+    if (!currentViewedTx) return showToast("Pilih pesanan dulu!", "error");
+    if (!printerCharacteristic) {
+        if (confirm("Printer belum terhubung. Hubungkan sekarang?")) {
+            await connectBluetooth();
+            if (!printerCharacteristic) return;
+        } else return;
+    }
+    if (isPrinting) return showToast("Sedang mencetak...", "info");
+    isPrinting = true;
+    showToast("Mengirim data ke printer...", "info");
+
+    try {
+        const tx = currentViewedTx;
+        const ESC = '\u001B', GS = '\u001D', init = ESC + '@';
+        const center = ESC + 'a' + '\u0001', left = ESC + 'a' + '\u0000';
+        const boldOn = ESC + 'E' + '\u0001', boldOff = ESC + 'E' + '\u0000';
+        const bigFont = GS + '!' + '\u0011', normalFont = GS + '!' + '\u0000';
+
+        let receiptText = init + center + boldOn + bigFont + "TOKO KAMI" + normalFont + boldOff + "\n" +
+            "0812-3456-7890 (WA)\nJl. Contoh Alamat No. 123\n--------------------------------\n" + left + 
+            `Tgl : ${tx.tanggal}\nPlg : ${tx.nama}\nWA  : ${tx.wa}\n--------------------------------\n`;
+
+        tx.items.forEach((item) => {
+            receiptText += `${boldOn}${item.nama} (${item.ukuran})${boldOff}\n`;
+            let detailStr = `  ${item.jml} x Rp ${item.harga.toLocaleString('id-ID')}`;
+            let subtotalStr = `Rp ${item.subtotal.toLocaleString('id-ID')}`;
+            let spaceCount = Math.max(1, 32 - (detailStr.length + subtotalStr.length));
+            receiptText += detailStr + " ".repeat(spaceCount) + subtotalStr + "\n";
+        });
+
+        receiptText += "--------------------------------\n" + `Total Item : ${tx.totalItem}\n` +
+            boldOn + `TOTAL BAYAR: Rp ${tx.totalHarga.toLocaleString('id-ID')}\n` + boldOff +
+            "--------------------------------\n" + center + "Barang yang sudah dibeli\ntidak dapat ditukar/dikembalikan\nTerima Kasih, Semoga Berkah!\n\n\n\n"; 
+
+        let encodedData = typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(receiptText) : strToBytes(receiptText);
+        const maxChunk = 50; 
+        for (let i = 0; i < encodedData.length; i += maxChunk) {
+            await printerCharacteristic.writeValue(encodedData.slice(i, i + maxChunk));
+            await new Promise(resolve => setTimeout(resolve, 50)); 
+        }
+        showToast("Selesai mencetak!");
+    } catch (error) { 
+        showToast("Gagal mencetak. Cek koneksi printer.", "error"); 
+        onDisconnected();
+    } finally { isPrinting = false; }
+}
+
+
+// ==========================================
+// --- HALAMAN 4: FUNGSI DASHBOARD ---
+// ==========================================
+
 document.addEventListener('click', function(event) {
     const isClickInsideJenis = event.target.closest('#dropdown-jenis-content') || event.target.closest('button[onclick*="dropdown-jenis-content"]');
     const isClickInsideUkuran = event.target.closest('#dropdown-ukuran-content') || event.target.closest('button[onclick*="dropdown-ukuran-content"]');
@@ -602,18 +710,14 @@ document.addEventListener('click', function(event) {
     if (!isClickInsidePelanggan) document.getElementById('autocomplete-pelanggan')?.classList.add('hidden');
 });
 
-// Fungsi buka/tutup dropdown checkbox
 function toggleDropdown(id) {
     const dropdown = document.getElementById(id);
     if (dropdown.classList.contains('hidden')) {
-        // Tutup yang lain dulu
         document.getElementById('dropdown-jenis-content').classList.add('hidden');
         document.getElementById('dropdown-ukuran-content').classList.add('hidden');
         document.getElementById('autocomplete-pelanggan').classList.add('hidden');
         dropdown.classList.remove('hidden');
-    } else {
-        dropdown.classList.add('hidden');
-    }
+    } else dropdown.classList.add('hidden');
 }
 
 async function loadDashboardData() {
@@ -622,121 +726,69 @@ async function loadDashboardData() {
         const url = `${SCRIPT_URL}?action=getDashboardData&v=${new Date().getTime()}`;
         const response = await fetch(url);
         if (!response.ok) throw new Error("Gagal terhubung ke server");
-        
         const result = await response.json();
         if (result.status === 'error') throw new Error(result.message);
-
         allSoldItems = result.data; 
-        
         populateDashboardFilters();
         applyDashboardFilters();
-
-    } catch (error) {
-        showToast("Gagal memuat dashboard: " + error.message, "error");
-    } finally {
-        toggleLoading(false);
-    }
+    } catch (error) { showToast("Gagal memuat dashboard", "error"); } 
+    finally { toggleLoading(false); }
 }
 
 function populateDashboardFilters() {
-    // 1. Ambil data unik
     const jenisSet = [...new Set(allSoldItems.map(item => item.jenis))].sort();
     const ukuranSet = [...new Set(allSoldItems.map(item => item.ukuran))].sort();
     uniqueCustomers = [...new Set(allSoldItems.map(item => item.pelanggan))].sort();
 
-    // 2. Render Checkbox Jenis (Dengan opsi Select All)
-    const listJenis = document.getElementById('list-checkbox-jenis');
-    let htmlJenis = `
-        <label class="flex items-center p-2 hover:bg-gray-100 cursor-pointer rounded border-b border-gray-200">
-            <input type="checkbox" id="selectAllJenis" onchange="toggleAllJenis(this)" class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500">
-            <span class="ml-2 text-sm font-bold text-gray-800">Centang Semua</span>
-        </label>
-    `;
-    htmlJenis += jenisSet.map(jenis => `
-        <label class="flex items-center p-2 hover:bg-blue-50 cursor-pointer rounded">
-            <input type="checkbox" value="${jenis}" onchange="updateSelectedJenis(this)" class="chk-jenis w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500">
-            <span class="ml-2 text-sm font-medium text-gray-700">${jenis}</span>
-        </label>
-    `).join('');
-    listJenis.innerHTML = htmlJenis;
+    document.getElementById('list-checkbox-jenis').innerHTML = `
+        <label class="flex items-center p-2 hover:bg-gray-100 cursor-pointer border-b border-gray-200">
+            <input type="checkbox" id="selectAllJenis" onchange="toggleAllJenis(this)" class="w-4 h-4">
+            <span class="ml-2 text-sm font-bold">Centang Semua</span>
+        </label>` + 
+        jenisSet.map(jenis => `
+        <label class="flex items-center p-2 hover:bg-blue-50 cursor-pointer">
+            <input type="checkbox" value="${jenis}" onchange="updateSelectedJenis(this)" class="chk-jenis w-4 h-4">
+            <span class="ml-2 text-sm">${jenis}</span>
+        </label>`).join('');
 
-    // 3. Render Checkbox Ukuran (Dengan opsi Select All)
-    const listUkuran = document.getElementById('list-checkbox-ukuran');
-    let htmlUkuran = `
-        <label class="flex items-center p-2 hover:bg-gray-100 cursor-pointer rounded border-b border-gray-200">
-            <input type="checkbox" id="selectAllUkuran" onchange="toggleAllUkuran(this)" class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500">
-            <span class="ml-2 text-sm font-bold text-gray-800">Centang Semua</span>
-        </label>
-    `;
-    htmlUkuran += ukuranSet.map(ukuran => `
-        <label class="flex items-center p-2 hover:bg-blue-50 cursor-pointer rounded">
-            <input type="checkbox" value="${ukuran}" onchange="updateSelectedUkuran(this)" class="chk-ukuran w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500">
-            <span class="ml-2 text-sm font-medium text-gray-700">${ukuran}</span>
-        </label>
-    `).join('');
-    listUkuran.innerHTML = htmlUkuran;
+    document.getElementById('list-checkbox-ukuran').innerHTML = `
+        <label class="flex items-center p-2 hover:bg-gray-100 cursor-pointer border-b border-gray-200">
+            <input type="checkbox" id="selectAllUkuran" onchange="toggleAllUkuran(this)" class="w-4 h-4">
+            <span class="ml-2 text-sm font-bold">Centang Semua</span>
+        </label>` + 
+        ukuranSet.map(ukuran => `
+        <label class="flex items-center p-2 hover:bg-blue-50 cursor-pointer">
+            <input type="checkbox" value="${ukuran}" onchange="updateSelectedUkuran(this)" class="chk-ukuran w-4 h-4">
+            <span class="ml-2 text-sm">${ukuran}</span>
+        </label>`).join('');
 }
 
-// Handler Centang Semua Jenis
-function toggleAllJenis(selectAllCheckbox) {
-    const checkboxes = document.querySelectorAll('.chk-jenis');
-    selectedJenis = [];
-    
-    checkboxes.forEach(cb => {
-        cb.checked = selectAllCheckbox.checked;
-        if (selectAllCheckbox.checked) {
-            selectedJenis.push(cb.value);
-        }
-    });
-    
-    updateLabelJenis();
-    applyDashboardFilters();
+function toggleAllJenis(selectAll) {
+    document.querySelectorAll('.chk-jenis').forEach(cb => { cb.checked = selectAll.checked; });
+    selectedJenis = selectAll.checked ? Array.from(document.querySelectorAll('.chk-jenis')).map(cb => cb.value) : [];
+    updateLabelJenis(); applyDashboardFilters();
 }
 
-// Handler Centang Semua Ukuran
-function toggleAllUkuran(selectAllCheckbox) {
-    const checkboxes = document.querySelectorAll('.chk-ukuran');
-    selectedUkuran = [];
-    
-    checkboxes.forEach(cb => {
-        cb.checked = selectAllCheckbox.checked;
-        if (selectAllCheckbox.checked) {
-            selectedUkuran.push(cb.value);
-        }
-    });
-    
-    updateLabelUkuran();
-    applyDashboardFilters();
+function toggleAllUkuran(selectAll) {
+    document.querySelectorAll('.chk-ukuran').forEach(cb => { cb.checked = selectAll.checked; });
+    selectedUkuran = selectAll.checked ? Array.from(document.querySelectorAll('.chk-ukuran')).map(cb => cb.value) : [];
+    updateLabelUkuran(); applyDashboardFilters();
 }
 
-// Handler saat checkbox individual ditekan
 function updateSelectedJenis(checkbox) {
     if (checkbox.checked) selectedJenis.push(checkbox.value);
     else selectedJenis = selectedJenis.filter(v => v !== checkbox.value);
-    
-    // Uncheck 'Select All' jika ada yang di-uncheck
-    const selectAllCb = document.getElementById('selectAllJenis');
-    const allCheckboxes = document.querySelectorAll('.chk-jenis');
-    selectAllCb.checked = (selectedJenis.length === allCheckboxes.length);
-
-    updateLabelJenis();
-    applyDashboardFilters();
+    document.getElementById('selectAllJenis').checked = (selectedJenis.length === document.querySelectorAll('.chk-jenis').length);
+    updateLabelJenis(); applyDashboardFilters();
 }
 
 function updateSelectedUkuran(checkbox) {
     if (checkbox.checked) selectedUkuran.push(checkbox.value);
     else selectedUkuran = selectedUkuran.filter(v => v !== checkbox.value);
-    
-    // Uncheck 'Select All' jika ada yang di-uncheck
-    const selectAllCb = document.getElementById('selectAllUkuran');
-    const allCheckboxes = document.querySelectorAll('.chk-ukuran');
-    selectAllCb.checked = (selectedUkuran.length === allCheckboxes.length);
-
-    updateLabelUkuran();
-    applyDashboardFilters();
+    document.getElementById('selectAllUkuran').checked = (selectedUkuran.length === document.querySelectorAll('.chk-ukuran').length);
+    updateLabelUkuran(); applyDashboardFilters();
 }
 
-// Fungsi bantu update label tombol
 function updateLabelJenis() {
     const label = document.getElementById('label-jenis');
     if (selectedJenis.length === 0) label.innerText = "Semua Jenis";
@@ -751,28 +803,15 @@ function updateLabelUkuran() {
     else label.innerText = `${selectedUkuran.length} Ukuran Dipilih`;
 }
 
-// Handler untuk Autocomplete Nama Pelanggan
 function handleCustomerSearch(event) {
-    const inputVal = event.target.value.toLowerCase();
-    const autocompleteDiv = document.getElementById('autocomplete-pelanggan');
+    const val = event.target.value.toLowerCase();
+    const div = document.getElementById('autocomplete-pelanggan');
     const ul = document.getElementById('list-saran-pelanggan');
+    const suggestions = uniqueCustomers.filter(name => name.toLowerCase().includes(val));
     
-    const suggestions = uniqueCustomers.filter(name => name.toLowerCase().includes(inputVal));
-    
-    if (suggestions.length === 0) {
-        autocompleteDiv.classList.add('hidden');
-        applyDashboardFilters(); 
-        return;
-    }
-
-    ul.innerHTML = suggestions.map(name => `
-        <li onclick="selectCustomer('${name.replace(/'/g, "\\'")}')" class="px-4 py-2 hover:bg-blue-50 cursor-pointer text-gray-700 border-b border-gray-100 last:border-0">
-            ${name}
-        </li>
-    `).join('');
-    
-    autocompleteDiv.classList.remove('hidden');
-    applyDashboardFilters(); 
+    if (suggestions.length === 0) { div.classList.add('hidden'); applyDashboardFilters(); return; }
+    ul.innerHTML = suggestions.map(name => `<li onclick="selectCustomer('${name.replace(/'/g, "\\'")}')" class="px-4 py-2 hover:bg-blue-50 cursor-pointer border-b">${name}</li>`).join('');
+    div.classList.remove('hidden'); applyDashboardFilters(); 
 }
 
 function selectCustomer(name) {
@@ -782,22 +821,15 @@ function selectCustomer(name) {
 }
 
 function applyDashboardFilters() {
-    const pelangganValue = document.getElementById('filter-pelanggan').value.toLowerCase();
-
-    let filteredItems = allSoldItems.filter(item => {
-        const jenisMatch = selectedJenis.length === 0 || selectedJenis.includes(item.jenis);
-        const ukuranMatch = selectedUkuran.length === 0 || selectedUkuran.includes(item.ukuran);
-        const pelangganMatch = !pelangganValue || item.pelanggan.toLowerCase().includes(pelangganValue);
-        
-        return jenisMatch && ukuranMatch && pelangganMatch;
+    const pValue = document.getElementById('filter-pelanggan').value.toLowerCase();
+    let filtered = allSoldItems.filter(item => {
+        return (selectedJenis.length === 0 || selectedJenis.includes(item.jenis)) &&
+               (selectedUkuran.length === 0 || selectedUkuran.includes(item.ukuran)) &&
+               (!pValue || item.pelanggan.toLowerCase().includes(pValue));
     });
 
-    const summary = {
-        totalPendapatan: 0, totalBarang: 0, produkTerlaris: '-',
-        penjualanPerJenis: {}, penjualanPerProduk: {}, transaksi: new Set() 
-    };
-
-    filteredItems.forEach(item => {
+    const summary = { totalPendapatan: 0, totalBarang: 0, produkTerlaris: '-', penjualanPerJenis: {}, penjualanPerProduk: {}, transaksi: new Set() };
+    filtered.forEach(item => {
         summary.totalPendapatan += item.subtotal;
         summary.totalBarang += item.jml;
         summary.penjualanPerJenis[item.jenis] = (summary.penjualanPerJenis[item.jenis] || 0) + item.subtotal;
@@ -806,28 +838,9 @@ function applyDashboardFilters() {
     });
     
     summary.totalTransaksi = summary.transaksi.size;
-    const sortedProduk = Object.entries(summary.penjualanPerProduk).sort((a, b) => b[1] - a[1]);
-    if (sortedProduk.length > 0) summary.produkTerlaris = sortedProduk[0][0];
+    const sorted = Object.entries(summary.penjualanPerProduk).sort((a, b) => b[1] - a[1]);
+    if (sorted.length > 0) summary.produkTerlaris = sorted[0][0];
     
-    renderDashboard(summary);
-}
-
-function resetDashboardFilters() {
-    selectedJenis = [];
-    selectedUkuran = [];
-    
-    document.querySelectorAll('#list-checkbox-jenis input[type="checkbox"]').forEach(cb => cb.checked = false);
-    document.querySelectorAll('#list-checkbox-ukuran input[type="checkbox"]').forEach(cb => cb.checked = false);
-    
-    updateLabelJenis();
-    updateLabelUkuran();
-    document.getElementById('filter-pelanggan').value = '';
-    document.getElementById('autocomplete-pelanggan').classList.add('hidden');
-
-    applyDashboardFilters();
-}
-
-function renderDashboard(summary) {
     document.getElementById('db-total-pendapatan').textContent = `Rp ${summary.totalPendapatan.toLocaleString('id-ID')}`;
     document.getElementById('db-total-barang').textContent = summary.totalBarang.toLocaleString('id-ID');
     document.getElementById('db-total-transaksi').textContent = summary.totalTransaksi.toLocaleString('id-ID');
@@ -837,213 +850,108 @@ function renderDashboard(summary) {
     renderChartTopProduk(summary.penjualanPerProduk);
 }
 
-function getRandomColor() {
-    const r = Math.floor(Math.random() * 200); const g = Math.floor(Math.random() * 200); const b = Math.floor(Math.random() * 200);
-    return `rgba(${r}, ${g}, ${b}, 0.7)`;
+function resetDashboardFilters() {
+    selectedJenis = []; selectedUkuran = [];
+    document.querySelectorAll('.chk-jenis, .chk-ukuran, #selectAllJenis, #selectAllUkuran').forEach(cb => cb.checked = false);
+    updateLabelJenis(); updateLabelUkuran();
+    document.getElementById('filter-pelanggan').value = '';
+    document.getElementById('autocomplete-pelanggan').classList.add('hidden');
+    applyDashboardFilters();
 }
+
+function getRandomColor() { return `rgba(${Math.floor(Math.random()*200)}, ${Math.floor(Math.random()*200)}, ${Math.floor(Math.random()*200)}, 0.7)`; }
 
 function renderChartJenis(data) {
     const ctx = document.getElementById('chart-jenis-barang').getContext('2d');
-    const labels = Object.keys(data); const values = Object.values(data);
-    const colors = labels.map(() => getRandomColor());
-
-    if (chartJenisBarang) {
-        chartJenisBarang.data.labels = labels;
-        chartJenisBarang.data.datasets[0].data = values;
-        chartJenisBarang.data.datasets[0].backgroundColor = colors;
-        chartJenisBarang.update();
-    } else {
-        chartJenisBarang = new Chart(ctx, {
-            type: 'doughnut',
-            data: { labels: labels, datasets: [{ label: 'Pendapatan', data: values, backgroundColor: colors, borderColor: '#fff', borderWidth: 2 }] },
-            options: { responsive: true, maintainAspectRatio: true }
-        });
-    }
+    const labels = Object.keys(data), values = Object.values(data), colors = labels.map(() => getRandomColor());
+    if (chartJenisBarang) { chartJenisBarang.data.labels = labels; chartJenisBarang.data.datasets[0].data = values; chartJenisBarang.data.datasets[0].backgroundColor = colors; chartJenisBarang.update(); } 
+    else chartJenisBarang = new Chart(ctx, { type: 'doughnut', data: { labels: labels, datasets: [{ label: 'Pendapatan', data: values, backgroundColor: colors, borderColor: '#fff', borderWidth: 2 }] } });
 }
 
 function renderChartTopProduk(data) {
     const ctx = document.getElementById('chart-top-produk').getContext('2d');
-    const sortedProduk = Object.entries(data).sort((a, b) => b[1] - a[1]).slice(0, 5);
-    const labels = sortedProduk.map(item => item[0]); const values = sortedProduk.map(item => item[1]);
-    const colors = labels.map(() => getRandomColor());
-
-    if (chartTopProduk) {
-        chartTopProduk.data.labels = labels;
-        chartTopProduk.data.datasets[0].data = values;
-        chartTopProduk.data.datasets[0].backgroundColor = colors;
-        chartTopProduk.update();
-    } else {
-        chartTopProduk = new Chart(ctx, {
-            type: 'bar',
-            data: { labels: labels, datasets: [{ label: 'Jumlah Terjual', data: values, backgroundColor: colors, borderColor: colors.map(c => c.replace('0.7', '1')), borderWidth: 1 }] },
-            options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } } }
-        });
-    }
+    const sorted = Object.entries(data).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    const labels = sorted.map(i => i[0]), values = sorted.map(i => i[1]), colors = labels.map(() => getRandomColor());
+    if (chartTopProduk) { chartTopProduk.data.labels = labels; chartTopProduk.data.datasets[0].data = values; chartTopProduk.data.datasets[0].backgroundColor = colors; chartTopProduk.update(); } 
+    else chartTopProduk = new Chart(ctx, { type: 'bar', data: { labels: labels, datasets: [{ label: 'Terjual', data: values, backgroundColor: colors }] }, options: { indexAxis: 'y', plugins: { legend: { display: false } } } });
 }
 
-// =========================================================================
-// --- SISTEM CETAK PRINTER THERMAL (BLUETOOTH WEB API) ---
-// =========================================================================
 
-// Variabel State Printer
-let printerDevice = null;
-let printerCharacteristic = null;
-let isPrinting = false;
+// ==========================================
+// --- HALAMAN 5: MANAJEMEN PENGGUNA ---
+// ==========================================
 
-// 1. Fungsi Koneksi Bluetooth
-async function connectBluetooth() {
-    if (!navigator.bluetooth) { 
-        alert("Browser/Perangkat ini tidak mendukung koneksi Bluetooth Web API. Gunakan Chrome di Android/PC."); 
-        return; 
-    }
-    
-    const btnBt = document.getElementById('btn-bt-connect');
-    const txtBt = document.getElementById('bt-status-text');
-
+async function loadUsers() {
+    toggleLoading(true, "Memuat data pengguna...");
     try {
-        if (printerDevice && printerDevice.gatt.connected) {
-            printerDevice.gatt.disconnect();
-        }
+        const url = `${SCRIPT_URL}?action=getUsers&v=${new Date().getTime()}`;
+        const response = await fetch(url);
+        const result = await response.json();
         
-        // Meminta user memilih printer Bluetooth (Standar service printer generic)
-        printerDevice = await navigator.bluetooth.requestDevice({ 
-            filters: [{ services: ['000018f0-0000-1000-8000-00805f9b34fb'] }] 
-        });
+        if (result.status === 'error') throw new Error(result.message);
         
-        printerDevice.addEventListener('gattserverdisconnected', onDisconnected);
-        const server = await printerDevice.gatt.connect();
-        
-        await new Promise(r => setTimeout(r, 500)); // Jeda sedikit agar stabil
-        
-        const service = await server.getPrimaryService('000018f0-0000-1000-8000-00805f9b34fb');
-        printerCharacteristic = await service.getCharacteristic('00002af1-0000-1000-8000-00805f9b34fb');
-        
-        // Update UI Tombol
-        btnBt.classList.remove('bg-gray-100', 'text-gray-600');
-        btnBt.classList.add('bg-green-600', 'text-white', 'border-green-700');
-        txtBt.innerText = "Printer Ready";
-        showToast("Printer Thermal Berhasil Terhubung!");
-        
-    } catch (e) { 
-        console.error(e);
-        if (e.name !== 'NotFoundError') { // Abaikan jika user sekadar klik cancel
-            alert("Gagal Konek: " + e.message); 
-        }
-        onDisconnected(); 
-    }
+        document.getElementById('tabel-users-body').innerHTML = result.data.map(u => `
+            <tr class="bg-white border-b hover:bg-gray-50 md:border-b-0">
+                <td data-label="Username" class="px-4 py-2 font-medium">${u.username}</td>
+                <td data-label="Role" class="px-4 py-2"><span class="px-2 py-1 rounded text-xs font-bold ${u.role==='admin'?'bg-purple-100 text-purple-700':'bg-green-100 text-green-700'}">${u.role.toUpperCase()}</span></td>
+                <td data-label="Aksi" class="px-4 py-2 text-center">
+                    <button onclick="editUser('${u.username}', '${u.role}')" class="text-blue-600 hover:text-blue-800 mr-2">Edit</button>
+                    <button onclick="deleteUser('${u.username}')" class="text-red-600 hover:text-red-800">Hapus</button>
+                </td>
+            </tr>
+        `).join('');
+    } catch (e) { showToast("Gagal memuat users", "error"); } 
+    finally { toggleLoading(false); }
 }
 
-function onDisconnected() {
-    const btnBt = document.getElementById('btn-bt-connect');
-    const txtBt = document.getElementById('bt-status-text');
+async function submitUser(e) {
+    e.preventDefault();
+    const username = document.getElementById('user-username').value.trim();
+    const passwordRaw = document.getElementById('user-password').value.trim();
+    const role = document.getElementById('user-role').value;
+    const originalUsername = document.getElementById('user-original-username').value;
+
+    if (!username) return showToast("Username wajib diisi!", "error");
+    if (!originalUsername && !passwordRaw) return showToast("Password wajib untuk user baru!", "error");
+
+    toggleLoading(true, "Menyimpan data...");
     
-    btnBt.classList.remove('bg-green-600', 'text-white', 'border-green-700');
-    btnBt.classList.add('bg-gray-100', 'text-gray-600');
-    txtBt.innerText = "Printer";
-    printerCharacteristic = null;
-}
-
-function strToBytes(str) {
-    const bytes = [];
-    for (let i = 0; i < str.length; i++) {
-        let code = str.charCodeAt(i);
-        if (code > 255) code = 63; // Replace karakter aneh dengan '?'
-        bytes.push(code);
-    }
-    return new Uint8Array(bytes);
-}
-
-// 2. Fungsi Cetak Format ESC/POS
-async function cetakStrukThermal() {
-    if (!currentViewedTx) return showToast("Tidak ada pesanan yang dipilih!", "error");
-    
-    if (!printerCharacteristic) {
-        const confirmConnect = confirm("Printer belum terhubung. Hubungkan Bluetooth sekarang?");
-        if (confirmConnect) {
-            await connectBluetooth();
-            if (!printerCharacteristic) return; // Batal jika gagal konek
-        } else {
-            return;
-        }
-    }
-
-    if (isPrinting) return showToast("Sedang mencetak, mohon tunggu...", "info");
-    isPrinting = true;
-    showToast("Mengirim data ke printer...", "info");
-
     try {
-        const tx = currentViewedTx;
+        const formData = new URLSearchParams({ action: 'saveUser', username, role });
+        if (originalUsername) formData.append('originalUsername', originalUsername);
+        if (passwordRaw) formData.append('password', await hashPassword(passwordRaw));
+
+        const response = await fetch(SCRIPT_URL, { method: 'POST', body: formData });
+        const text = await response.text();
         
-        // Perintah ESC/POS
-        const ESC = '\u001B'; const GS = '\u001D';
-        const center = ESC + 'a' + '\u0001'; const left = ESC + 'a' + '\u0000';
-        const boldOn = ESC + 'E' + '\u0001'; const boldOff = ESC + 'E' + '\u0000';
-        const bigFont = GS + '!' + '\u0011'; const normalFont = GS + '!' + '\u0000';
-        const init = ESC + '@';
-
-        // HEADER
-        let receiptText = 
-            init + 
-            center + boldOn + bigFont + "Nama Toko Anda" + normalFont + boldOff + "\n" +
-            "0811-2222-3333 (WA)\n" +
-            "Alamat Toko Nanti Disini\n" +
-            "--------------------------------\n" +
-            left + 
-            `Plg : ${tx.nama}\n` +
-            `WA  : ${tx.wa}\n` +
-            "--------------------------------\n";
-
-        // ITEMS
-        tx.items.forEach((item) => {
-            // Baris 1: Nama Barang (Ukuran)
-            receiptText += `${boldOn}${item.nama} (${item.ukuran})${boldOff}\n`;
-            
-            // Baris 2: Qty x Harga = Subtotal (Manual padding spasi)
-            let detailStr = `  ${item.jml} x Rp ${item.harga.toLocaleString('id-ID')}`;
-            let subtotalStr = `Rp ${item.subtotal.toLocaleString('id-ID')}`;
-            
-            // Menghitung spasi agar subtotal rata kanan (asumsi 32 karakter per baris utk 58mm)
-            let spaceCount = 32 - (detailStr.length + subtotalStr.length);
-            if (spaceCount < 1) spaceCount = 1; 
-            
-            receiptText += detailStr + " ".repeat(spaceCount) + subtotalStr + "\n";
-        });
-
-        // FOOTER & TOTAL
-        receiptText += 
-            "--------------------------------\n" +
-            `Total Item : ${tx.totalItem}\n` +
-            boldOn + 
-            `TOTAL BAYAR: Rp ${tx.totalHarga.toLocaleString('id-ID')}\n` +
-            boldOff +
-            "--------------------------------\n" +
-            center + "Barang yang sudah dibeli\n" +
-            "tidak dapat ditukar/dikembalikan\n" +
-            "Terima Kasih, Semoga Berkah!\n\n\n\n"; // \n ekstra untuk feed kertas
-
-        // Encode ke Bytes
-        let encodedData = typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(receiptText) : strToBytes(receiptText);
-        
-        // Kirim bergiliran (Chunking) untuk mencegah buffer penuh di printer kecil
-        const maxChunk = 50; 
-        for (let i = 0; i < encodedData.length; i += maxChunk) {
-            const chunk = encodedData.slice(i, i + maxChunk);
-            await printerCharacteristic.writeValue(chunk);
-            await new Promise(resolve => setTimeout(resolve, 50)); // Jeda 50ms per chunk
-        }
-
-        showToast("Selesai mencetak!");
-
-    } catch (error) { 
-        console.error(error);
-        showToast("Gagal mencetak: Cek koneksi printer.", "error"); 
-        onDisconnected();
-    } finally {
-        isPrinting = false;
-    }
+        if (text.includes("Tersimpan") || text.includes("diperbarui") || text.includes("ditambahkan")) {
+            showToast(text); resetFormUser(); loadUsers();
+        } else showToast(text, "info");
+    } catch (e) { showToast("Error", "error"); } 
+    finally { toggleLoading(false); }
 }
 
-// 3. Ganti Fungsi cetakStruk() Lama menjadi ini
-function cetakStrukA4() {
-    window.print();
+function editUser(username, role) {
+    document.getElementById('user-username').value = username;
+    document.getElementById('user-role').value = role;
+    document.getElementById('user-original-username').value = username; 
+    document.getElementById('user-password').placeholder = "Kosongkan jika password tetap";
+    document.getElementById('user-password').value = "";
+    document.getElementById('user-username').focus();
+}
+
+function resetFormUser() {
+    document.getElementById('form-user').reset();
+    document.getElementById('user-original-username').value = "";
+    document.getElementById('user-password').placeholder = "Isi untuk reset password";
+}
+
+async function deleteUser(username) {
+    if (!confirm(`Hapus pengguna "${username}"?`)) return;
+    toggleLoading(true, "Menghapus...");
+    try {
+        await fetch(SCRIPT_URL, { method: 'POST', body: new URLSearchParams({ action: 'deleteUser', username }) });
+        showToast("Pengguna dihapus"); loadUsers();
+    } catch (e) { showToast("Gagal hapus", "error"); } 
+    finally { toggleLoading(false); }
 }
