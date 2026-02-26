@@ -3,7 +3,7 @@
 // ==========================================
 
 // PENTING: Ganti URL di bawah ini dengan URL Web App (Exec) terbaru Anda!
-const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzX_vVW7xQFa1PkDqSPl9UFgUEZMMiisd12q8NNVDSEhdeXBN90y9vkDb0D49jwuhsxyQ/exec';
+const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwV_H2oV4RXQzV0RnkdaabDhbBT51swvPmxYsZyhw9RSzTw85TRU2yv7zWtkffvRcOU/exec';
 
 // State Aplikasi Utama
 let databaseBarang = [];
