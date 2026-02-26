@@ -1141,3 +1141,16 @@ async function deleteUser(username) {
         toggleLoading(false);
     }
 }
+
+// --- UTILS: FULL SCREEN ---
+function toggleFullScreen() {
+    if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch((e) => {
+            console.log(e);
+        });
+    } else {
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
+        }
+    }
+}
