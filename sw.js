@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pos-kasir-v1';
+const CACHE_NAME = 'pos-kasir-v2';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
