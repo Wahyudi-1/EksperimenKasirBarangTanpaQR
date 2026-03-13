@@ -5,6 +5,17 @@
 // PENTING: Ganti URL di bawah ini dengan URL Web App (Exec) terbaru Anda!
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwV_H2oV4RXQzV0RnkdaabDhbBT51swvPmxYsZyhw9RSzTw85TRU2yv7zWtkffvRcOU/exec';
 
+// State Pengaturan Toko (Saran E: Hindari Hardcode)
+// Anda bisa mengubah data ini tanpa harus mencari-cari di dalam ratusan baris kode.
+// (Kedepannya, objek ini bisa Anda isi hasil fetch dari Google Sheets khusus setting)
+let appSettings = {
+    rekeningBank: "Seabank : 901355785479\natau\nShopee pay/gopay : 081357432595\nAtas nama : Ummu Hayatin",
+    pesanPenutup: "Terima kasih banyak telah berbelanja, Semoga berkah! 🙏😊",
+    headerStruk: "TOKO KAMI",
+    alamatStruk: "Jl. Contoh Alamat No. 123",
+    kontakStruk: "0812-3456-7890 (WA)"
+};
+
 // State Aplikasi Utama
 let databaseBarang = [];
 let keranjang = [];
@@ -21,11 +32,10 @@ let selectedJenis = [];
 let selectedUkuran = [];
 let uniqueCustomers = []; 
 
-// State Printer & Offline
+// State Printer
 let printerDevice = null;
 let printerCharacteristic = null;
 let isPrinting = false;
-let offlineQueue = JSON.parse(localStorage.getItem('pos_offline_queue') || '[]');
 
 
 // ==========================================
@@ -44,38 +54,23 @@ window.onload = () => {
         processLoginSuccess(savedRole);
     }
 
-    // Cek Koneksi Internet
+    // Cek Koneksi Internet & Render UI Antrean IndexedDB
     updateNetworkStatus();
+    updateQueueUI(); // (Saran B) Fetch jumlah antrian dari IndexedDB
     window.addEventListener('online',  () => { updateNetworkStatus(); processOfflineQueue(); });
     window.addEventListener('offline', () => updateNetworkStatus());
-    updateQueueUI();
 };
 
 function updateNetworkStatus() {
     const indicator = document.getElementById('offline-indicator');
-    if (!indicator) return; // Safety check jika elemen belum ada di HTML
+    if (!indicator) return; 
     
     if (!navigator.onLine) {
         indicator.classList.remove('hidden');
         indicator.classList.add('flex');
         showToast("Mode Offline: Data akan disimpan di HP dulu.", "info");
     } else {
-        if (offlineQueue.length === 0) indicator.classList.add('hidden');
-    }
-}
-
-function updateQueueUI() {
-    const countEl = document.getElementById('queue-count');
-    const indicator = document.getElementById('offline-indicator');
-    if (countEl) countEl.innerText = offlineQueue.length;
-    
-    if (indicator) {
-        if (offlineQueue.length > 0) {
-            indicator.classList.remove('hidden');
-            indicator.classList.add('flex');
-        } else if (navigator.onLine) {
-            indicator.classList.add('hidden');
-        }
+        updateQueueUI(); // Cek lagi apakah masih ada queue tersisa
     }
 }
 
@@ -146,8 +141,102 @@ function switchTab(pageId) {
 
 
 // ==========================================
-// 4. CORE: OFFLINE SYNC SYSTEM
+// 4. CORE: INDEXED-DB OFFLINE SYNC (Saran B)
 // ==========================================
+
+const DB_NAME = 'POSDatabase';
+const DB_VERSION = 1;
+const STORE_NAME = 'offlineQueue';
+
+// Inisialisasi Database IndexedDB
+function initIndexedDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onerror = (event) => reject("Error opening DB: " + event.target.error);
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME, { autoIncrement: true }); 
+            }
+        };
+        request.onsuccess = (event) => resolve(event.target.result);
+    });
+}
+
+// Ambil semua antrean dari IndexedDB
+async function getOfflineQueue() {
+    try {
+        const db = await initIndexedDB();
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction(STORE_NAME, "readonly");
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.getAll();
+            const keysRequest = store.getAllKeys();
+            
+            transaction.oncomplete = () => {
+                const items = request.result.map((data, index) => ({
+                    id: keysRequest.result[index],
+                    payload: data
+                }));
+                resolve(items);
+            };
+            transaction.onerror = () => reject("Gagal membaca antrian");
+        });
+    } catch (error) {
+        console.error(error);
+        return [];
+    }
+}
+
+// Update Angka Indikator UI dari IndexedDB
+async function updateQueueUI() {
+    const queueItems = await getOfflineQueue();
+    const count = queueItems.length;
+    
+    const countEl = document.getElementById('queue-count');
+    const indicator = document.getElementById('offline-indicator');
+    
+    if (countEl) countEl.innerText = count;
+    
+    if (indicator) {
+        if (count > 0 || !navigator.onLine) {
+            indicator.classList.remove('hidden');
+            indicator.classList.add('flex');
+        } else {
+            indicator.classList.add('hidden');
+        }
+    }
+}
+
+// Hapus antrean yang sudah sukses terkirim
+async function removeFromQueue(id) {
+    try {
+        const db = await initIndexedDB();
+        const transaction = db.transaction(STORE_NAME, "readwrite");
+        const store = transaction.objectStore(STORE_NAME);
+        store.delete(id);
+        return new Promise(resolve => transaction.oncomplete = resolve);
+    } catch (error) {
+        console.error("Gagal menghapus dari queue", error);
+    }
+}
+
+async function saveToQueue(payload) {
+    try {
+        const db = await initIndexedDB();
+        const transaction = db.transaction(STORE_NAME, "readwrite");
+        const store = transaction.objectStore(STORE_NAME);
+        // Payload di-convert ke plain object agar mudah disimpan di IndexedDB
+        const payloadObj = Object.fromEntries(new URLSearchParams(payload));
+        store.add(payloadObj);
+        
+        transaction.oncomplete = () => {
+            updateQueueUI();
+        };
+    } catch (error) {
+        console.error("Gagal simpan ke IndexedDB", error);
+    }
+}
 
 async function sendData(payload, successMessage) {
     if (navigator.onLine) {
@@ -164,48 +253,41 @@ async function sendData(payload, successMessage) {
             }
         } catch (error) {
             console.error("Gagal kirim, masuk antrian:", error);
-            saveToQueue(payload);
+            await saveToQueue(payload);
             return false;
         }
     } else {
-        saveToQueue(payload);
-        showToast("Offline: Data disimpan. Akan dikirim saat online.", "info");
+        await saveToQueue(payload);
+        showToast("Offline: Data disimpan. Akan dikirim otomatis saat online.", "info");
         return true;
     }
 }
 
-function saveToQueue(payload) {
-    offlineQueue.push(payload);
-    localStorage.setItem('pos_offline_queue', JSON.stringify(offlineQueue));
-    updateQueueUI();
-}
-
 async function processOfflineQueue() {
-    if (offlineQueue.length === 0) return;
+    const queueItems = await getOfflineQueue();
+    if (queueItems.length === 0) return;
 
-    showToast(`Sinkronisasi: Mengirim ${offlineQueue.length} data tertunda...`, "info");
+    showToast(`Sinkronisasi: Mengirim ${queueItems.length} data tertunda...`, "info");
     toggleLoading(true, "Sinkronisasi Data...");
 
-    const queueCopy = [...offlineQueue];
     let successCount = 0;
 
-    for (let i = 0; i < queueCopy.length; i++) {
-        const payload = queueCopy[i];
+    for (const item of queueItems) {
         try {
-            const formData = new URLSearchParams(payload);
+            const formData = new URLSearchParams(item.payload);
             await fetch(SCRIPT_URL, { method: 'POST', body: formData });
             
-            offlineQueue.shift(); 
-            localStorage.setItem('pos_offline_queue', JSON.stringify(offlineQueue));
-            updateQueueUI();
+            await removeFromQueue(item.id);
             successCount++;
         } catch (error) {
-            console.error("Gagal sinkron item ke-" + i, error);
-            break; 
+            console.error("Gagal sinkron item ID-" + item.id, error);
+            break; // Stop loop jika error network lagi
         }
     }
 
+    await updateQueueUI();
     toggleLoading(false);
+    
     if (successCount > 0) {
         showToast(`Sinkronisasi Selesai: ${successCount} data terkirim!`);
         loadDatabase(); 
@@ -214,7 +296,7 @@ async function processOfflineQueue() {
 
 
 // ==========================================
-// 5. LOGIN & USER MANAGEMENT
+// 5. LOGIN & PENGAMBILAN DATA
 // ==========================================
 
 async function hashPassword(password) {
@@ -269,6 +351,35 @@ function processLoginSuccess(role) {
     document.getElementById('app-container').classList.add('flex'); 
     applyRolePermissions();
     if (databaseBarang.length === 0) loadDatabase();
+}
+
+// FUNGSI BARU (Saran A): Memuat Data Barang dari Spreadsheet
+async function loadDatabase() {
+    toggleLoading(true, "Memuat Database Barang...");
+    try {
+        const url = `${SCRIPT_URL}?action=getBarang&v=${new Date().getTime()}`;
+        const response = await fetch(url);
+        const result = await response.json();
+        
+        if (result.status === 'success') {
+            databaseBarang = result.data || [];
+            // Buat list jenis unik berdasarkan data terbaru
+            jenisUnik = [...new Set(databaseBarang.map(item => item.jenis))].sort();
+            
+            // Refresh elemen UI di form Transaksi
+            updateDropdownJenis();
+            updateDropdownNamaSemua();
+        } else {
+            console.error("Server message:", result.message);
+        }
+    } catch (error) {
+        console.error("Gagal memuat database: ", error);
+        if (databaseBarang.length === 0) {
+            showToast("Mode Offline: Database masih kosong, hubungkan internet untuk sinkronisasi.", "info");
+        }
+    } finally {
+        toggleLoading(false);
+    }
 }
 
 function applyRolePermissions() {
@@ -328,6 +439,12 @@ async function submitBarang(e) {
         // Update lokal agar UI responsif
         if(actionType === 'addBarang') {
             databaseBarang.push({ jenis, nama, harga: parseInt(harga), ukuran });
+            // Update jenis array jika ada jenis baru
+            if(!jenisUnik.includes(jenis)) {
+                jenisUnik.push(jenis);
+                jenisUnik.sort();
+                updateDropdownJenis();
+            }
         } else {
             itemExists.harga = parseInt(harga);
         }
@@ -573,6 +690,14 @@ function tampilkanStruk(tx) {
     document.getElementById('rekap-total-item').innerText = tx.totalItem;
     document.getElementById('rekap-total-harga').innerText = tx.totalHarga.toLocaleString('id-ID');
 
+    // (Saran E) Update teks di UI Struk HTML mengikuti appSettings
+    document.querySelector('.receipt-container h2').innerText = appSettings.headerStruk;
+    const pElements = document.querySelectorAll('.receipt-container .text-center.mb-4 p');
+    if(pElements.length >= 2) {
+        pElements[0].innerText = appSettings.alamatStruk;
+        pElements[1].innerText = "Telp: " + appSettings.kontakStruk;
+    }
+
     const tbody = document.getElementById('tabel-rekap-body');
     let html = '';
     tx.items.forEach((item) => {
@@ -604,7 +729,9 @@ function kirimWhatsApp() {
         pesan += `${item.nama} (Uk: ${item.ukuran})\n   ${item.jml} x Rp ${item.harga.toLocaleString('id-ID')} = Rp ${item.subtotal.toLocaleString('id-ID')}\n`;
     });
     pesan += `\n==================\n*TOTAL TAGIHAN : Rp ${totalHarga.toLocaleString('id-ID')}*\n==================\n\n`;
-    pesan += `Pembayaran dapat dilakukan secara tunai atau transfer\n\nTransfer dapat dilakukan melalui\nSeabank : 901355785479\natau\nShopee pay/gopay : 081357432595\nAtas nama : Ummu Hayatin\n\n*Pastikan konfirmasi dengan mengirimkan bukti pembayaran.*\n\nTerima kasih banyak telah berbelanja, Semoga berkah! 🙏😊`;
+    
+    // Saran E: Menggunakan variabel dinamis appSettings
+    pesan += `Pembayaran dapat dilakukan secara tunai atau transfer\n\nTransfer dapat dilakukan melalui\n${appSettings.rekeningBank}\n\n*Pastikan konfirmasi dengan mengirimkan bukti pembayaran.*\n\n${appSettings.pesanPenutup}`;
 
     window.open(`https://wa.me/${wa}?text=${encodeURIComponent(pesan)}`, '_blank');
 }
@@ -628,7 +755,6 @@ function hapusPesanan() {
     toggleLoading(true, 'Menghapus Pesanan...');
     const formData = new URLSearchParams({ action: 'deleteTransaksi', id: currentViewedTx.id });
 
-    // Gunakan wrapper sendData agar support offline queue (opsional) atau fetch biasa
     fetch(SCRIPT_URL, { method: 'POST', body: formData })
         .then(res => res.text())
         .then(text => {
@@ -737,8 +863,9 @@ async function cetakStrukThermal() {
         const boldOn = ESC + 'E' + '\u0001', boldOff = ESC + 'E' + '\u0000';
         const bigFont = GS + '!' + '\u0011', normalFont = GS + '!' + '\u0000';
 
-        let receiptText = init + center + boldOn + bigFont + "TOKO KAMI" + normalFont + boldOff + "\n" +
-            "0812-3456-7890 (WA)\nJl. Contoh Alamat No. 123\n--------------------------------\n" + left + 
+        // (Saran E) Header dan alamat dipanggil dari appSettings
+        let receiptText = init + center + boldOn + bigFont + appSettings.headerStruk + normalFont + boldOff + "\n" +
+            appSettings.kontakStruk + "\n" + appSettings.alamatStruk + "\n--------------------------------\n" + left + 
             `Tgl : ${tx.tanggal}\nPlg : ${tx.nama}\nWA  : ${tx.wa}\n--------------------------------\n`;
 
         tx.items.forEach((item) => {
